@@ -2,172 +2,105 @@
   Ceph Release Process
 ======================
 
-1. Build environment
-====================
+Prequisites
+===========
 
-There are multiple build environments, debian based packages are built via pbuilder for multiple distributions.  The build hosts are listed in the ``deb_hosts`` file, and the list of distributions are in ``deb_dist``.  All distributions are build on each of the build hosts.  Currently there is 1 64 bit and 1 32 bit build host.
+Signing Machine
+---------------
+The signing machine is a virtual machine in the `Sepia lab<https://wiki.sepia.ceph.com/doku.php?id=start>`_.  SSH access is limited to the usual Infrastructure Admins along with a few other component leads (e.g., nfs-ganesha, ceph-iscsi).
 
-The RPM based packages are built natively, so one distribution per build host.  The list of hosts is found in ``rpm_hosts``.
+The ``ubuntu`` user on the machine has a few `build scripts`<https://github.com/ceph/ceph-build/tree/main/scripts>`_ to ease the pulling, pushing, and signing of packages.
 
-Prior to building, it's necessary to update the pbuilder seed tarballs::
+Finally, the GPG signing key permanently lives on a `Nitrokey Pro`<https://shop.nitrokey.com/shop/product/nkpr2-nitrokey-pro-2-3>`_ and is passed through to the VM via RHV.  This helps ensure the key can not be exported or leave the datacenter in any way.
 
-    ./update_all_pbuilders.sh
+New Major Releases
+------------------
+For new major (alphabetical) releases, RPM repos need a `ceph-release` RPM created.  The chacra repos are configured to include this RPM but it must be built separately. You must make sure that chacra is properly configured to include this RPM though for the release you are doing. See `this PR<https://github.com/ceph/chacra/pull/219>`_ for an example.
 
-2. Setup keyring for signing packages
-=====================================
+If chacra is not configured correctly please make that change and deploy it before starting the build of ceph or ceph-release.
+
+https://jenkins.ceph.com/view/all/job/ceph-release-rpm/
+
+Summarized build process
+========================
+
+1. QE finishes testing and finds a stopping point.  That commit is pushed to the ``$release-release`` branch in ceph.git (e.g., quincy-release).  This allows work to continue in the working ``$release`` branch without having to freeze it during the release process.
+2. The Ceph Council approves and notifies the Build Lead.
+3. Build Lead starts [Jenkins multijob](https://jenkins.ceph.com/view/all/job/ceph) which triggers all builds.
+4. Packages are pushed to chacra.ceph.com.
+5. Packages are pulled from chacra.ceph.com to the Signer VM.
+6. Packages are signed.
+7. Packages are pushed to download.ceph.com.
+8. Release containers are built and pushed to quay.io.
+
+1. Starting the build
+=====================
+
+We'll use a 17.2.4 release of Quincy as an example.
+
+Browse to https://jenkins.ceph.com/view/all/job/ceph/build?delay=0sec.
 
 ::
 
-    export GNUPGHOME=<path to keyring dir>
+    BRANCH=quincy
+    TAG=checked
+    VERSION=17.2.4
+    RELEASE_TYPE=STABLE
+    ARCHS=x86_64 arm64
 
-    # verify it's accessible
-    gpg --list-keys
+Use https://docs.ceph.com/en/latest/start/os-recommendations/?highlight=debian#platforms to determine the ``DISTROS`` parameter.  In Quincy's case, ``DISTROS=centos8 centos9 focal bullseye``.
 
-The release key should be present::
+Click ``Build``!
 
-  pub   4096R/17ED316D 2012-05-20
-  uid   Ceph Release Key <sage@newdream.net>
+2. Release Notes
+================
 
+Packages take hours to build so now would be a good time to create the Release Notes.
 
-3. Set up build area
-====================
+See https://tracker.ceph.com/projects/ceph-releases/wiki/HOWTO_write_the_release_notes
 
-Clone the ceph and ceph-build source trees::
+3. Signing and Publishing the Build
+===================================
 
-    git clone http://github.com/ceph/ceph.git
-    git clone http://github.com/ceph/ceph-build.git
+Obtain the sha1 of the version commit from the `build job<https://jenkins.ceph.com/view/all/job/ceph>`_.
 
-In the ceph source directory, checkout next branch (for point releases use the {codename} branch)::
+::
 
-    git checkout next
+    ssh ubuntu@signer.front.sepia.ceph.com
+    sync-pull ceph octopus <sha1>
 
-Checkout the submodules::
+Sign the DEBs::
 
-    git submodule update --force --init --recursive
+    merfi gpg /opt/repos/ceph/quincy-17.2.4/debian
 
-4.  Update Build version numbers
-================================
+Sign the RPMs::
 
-Substitute the ceph release number where indicated below by the string ``0.xx``.
+    sign-rpms quincy
 
-Edit configure.ac and update the version number. Example diff::
+Publish the packages to download.ceph.com::
 
-	-AC_INIT([ceph], [0.54], [ceph-devel@vger.kernel.org])
-	+AC_INIT([ceph], [0.55], [ceph-devel@vger.kernel.org])
- 
-Update the version number in the debian change log::
+    sync-push quincy
 
-	DEBEMAIL user@host dch -v 0.xx-1
-
-Commit the changes::
-
-	git commit -a
-
-Tag the release::
-
-	../ceph-build/tag-release v0.xx
-
-
-5. Create Makefiles
+4. Build Containers
 ===================
 
-The actual configure options used to build packages are in the
-``ceph.spec.in`` and ``debian/rules`` files.  At this point we just
-need to create a Makefile.::
+Start the following two jobs
 
-	./do_autogen.sh
+https://2.jenkins.ceph.com/job/ceph-container-build-ceph-base-push-imgs/
 
+https://2.jenkins.ceph.com/job/ceph-container-build-ceph-base-push-imgs-arm64/
 
-6. Run the release scripts
-==========================
+5. Announce the Release
+=======================
 
-This creates tarballs and copies them, with other needed files to
-the build hosts listed in deb_hosts and rpm_hosts, runs a local build
-script, then rsyncs the results back to the specified release directory.::
+Version Commit PR
+-----------------
 
-	../ceph-build/do_release.sh /tmp/release
+The `ceph-tag<https://jenkins.ceph.com/job/ceph-tag>`_ Jenkins job will create a Pull Request in ceph.git targeting the release branch.
 
+If this was a regular (not hotfix/security) release, the only commit in that Pull Request should be the version commit.  e.g., `PR#47520<https://github.com/ceph/ceph/pull/47520>`_.  Request a review and merge.
 
-7. Create RPM Repo
-==================
+Announcing
+----------
 
-Copy the rpms to the destination repo::
-
-       mkdir /tmp/rpm-repo
-       ../ceph-build/push_to_rpm_repo.sh /tmp/release /tmp/rpm-repo 0.xx
-
-Next add any additional rpms to the repo that are needed such as leveldb.
-See RPM Backports section
-
-Finally, sign the rpms and build the repo indexes::
-
-  ../ceph-build/sign_and_index_rpm_repo.sh /tmp/release /tmp/rpm-repo 0.xx
-
-
-8. Create Debian repo
-=====================
-
-The key-id used below is the id of the ceph release key from step 2::
-
-	mkdir /tmp/debian-repo
-	../ceph-build/gen_reprepro_conf.sh /tmp/debian-repo key-id
-	../ceph-build/push_to_deb_repo.sh /tmp/release /tmp/debian-repo 0.xx main
-
-
-Next add any addition debian packages that are needed such as leveldb.
-See the Debian Backports section below.
-
-Debian packages are signed when added to the repo, so no further action is
-needed.
-
-
-9.  Push repos to ceph.org
-==========================
-
-For a development release::
-
-	rcp ceph-0.xx.tar.bz2 ceph-0.xx.tar.gz \
-	     ceph_site@ceph.com:ceph.com/downloads/.
-	rsync -av /tmp/rpm-repo/0.xx/ ceph_site@ceph.com:ceph.com/rpm-testing
-	rsync -av /tmp/debian-repo/ ceph_site@ceph.com:ceph.com/debian-testing
-
-For a stable release, replace {CODENAME} with the release codename (e.g., ``argonaut`` or ``bobtail``)::
-
-        rcp ceph-0.xx.tar.bz2 \
-            ceph_site@ceph.com:ceph.com/downloads/ceph-0.xx.tar.bz2
-        rcp ceph-0.xx.tar.gz  \
-            ceph_site@ceph.com:ceph.com/downloads/ceph-0.xx.tar.gz
-        rsync -av /tmp/rpm-repo/0.xx/ ceph_site@ceph.com:ceph.com/rpm-{CODENAME}
-        rsync -auv /tmp/debian-repo/ ceph_site@ceph.com:ceph.com/debian-{CODENAME}
-
-10. Update Git
-==============
-
-Point release
--------------
-
-For point releases just push the version number update to the
-branch and the new tag::
-
-    git push origin {codename}
-    git push origin v0.xx
-
-Development and Stable releases
--------------------------------
-
-For a development release, update tags for ``ceph.git``::
-
-    git push origin v0.xx
-    git push origin HEAD:last
-    git checkout master
-    git merge next
-    git push origin master
-    git push origin HEAD:next
-
-Similarly, for a development release, for both ``teuthology.git`` and ``ceph-qa-suite.git``::
-
-    git checkout master
-    git reset --hard origin/master
-    git branch -f last origin/next
-    git push -f origin last
-    git push -f origin master:next
+Publish the Release Notes on ceph.io first since the e-mail announcement references the ceph.io blog post.
