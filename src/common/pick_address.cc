@@ -522,10 +522,38 @@ std::string pick_iface(CephContext *cct, const struct sockaddr_storage &network)
     lderr(cct) << "unable to fetch interfaces and addresses: " << err << dendl;
     return {};
   }
+  struct sockaddr_in *sa;
+  struct sockaddr_in *sa_mask;
+  char * __addr;
+  char * __mask = "1.1.1.1";
+  struct sockaddr_in *addr_in = (struct sockaddr_in *)&network;
+  char *s = inet_ntoa(addr_in->sin_addr);
+  lderr(cct) << "pick_iface: Interface target and addresses: " << s << dendl;
+
   auto free_ifa = make_scope_guard([ifa] { freeifaddrs(ifa); });
   const unsigned int prefix_len = std::max(sizeof(in_addr::s_addr), sizeof(in6_addr::s6_addr)) * CHAR_BIT;
+
+  lderr(cct) << "pick_iface: Interface target and addresses: " << s << " prefix_len "<< prefix_len <<  dendl;
+
   for (auto addr = ifa; addr != nullptr; addr = addr->ifa_next) {
-    if (matches_with_net(*ifa, (const struct sockaddr *) &network, prefix_len,
+     
+      sa = (struct sockaddr_in *) addr->ifa_addr;
+      __addr = inet_ntoa(sa->sin_addr);
+      sa_mask = (struct sockaddr_in *)addr->ifa_netmask;
+      if(sa_mask != nullptr)
+          __mask =inet_ntoa(sa_mask->sin_addr); 
+            
+      lderr(cct) << "pick_iface Interface " << addr->ifa_name << " and addresses: " << __addr  << dendl; 	  
+     
+      sa_mask = (struct sockaddr_in *)addr->ifa_netmask;
+      if(sa_mask != nullptr)
+          __mask =inet_ntoa(sa_mask->sin_addr);
+
+      lderr(cct) << "pick_iface Interface " << "  mask : " << __mask  << dendl;
+
+      uintptr_t p_addr = reinterpret_cast<uintptr_t>(ifa);
+      lderr(cct) << "pick_iface pointer address :"  <<  p_addr  << dendl;      
+    if (matches_with_net(*addr, (const struct sockaddr *) &network, prefix_len,
 			 CEPH_PICK_ADDRESS_IPV4 | CEPH_PICK_ADDRESS_IPV6)) {
       return addr->ifa_name;
     }
@@ -559,7 +587,7 @@ bool have_local_addr(CephContext *cct, const std::list<entity_addr_t>& ls, entit
   return false;
 }
 
-int get_iface_numa_node(
+int get_iface_numa_node_legacy(
   const std::string& iface,
   int *node)
 {
@@ -610,7 +638,7 @@ int get_iface_numa_node(
     get_str_vec(ifacestr, " ", sv);
     for (auto& iter : sv) {
       int bn = -1;
-      r = get_iface_numa_node(iter, &bn);
+      r = get_iface_numa_node_legacy(iter, &bn);
       if (r >= 0) {
         if (bond_node == -1 || bn == bond_node) {
           bond_node = bn;
@@ -631,3 +659,95 @@ int get_iface_numa_node(
   return r;
 }
 
+int  getInterfaceList(std::vector<std::string>& interfaces) {
+
+    struct ifaddrs* ifaddr, * ifa;
+
+    if (getifaddrs(&ifaddr) == -1) {
+        return 0;
+    }
+
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == nullptr)
+            continue;
+
+        if (ifa->ifa_addr->sa_family == AF_PACKET && (ifa->ifa_flags & IFF_UP)) {
+
+            std::string name = ifa->ifa_name;
+            interfaces.push_back(name);
+        }
+    }
+
+    freeifaddrs(ifaddr);
+    if(interfaces.size() > 0 )
+       return 1;
+    else
+       return 0;
+}
+
+void CheckSubLayerInterfaceMap(const std::string &inf,
+                              std::vector<std::string>& infList,
+                              std::map<std::string,std::string>& infMap
+                              )
+{
+    std::string root = "/sys/class/net/";
+    // /sys/class/net/ens3/upper_ens3.21/
+
+    for(auto It =infList.begin(); It != infList.end() ; It++ )
+    {
+      if (*It != inf)
+      {
+        std::string  subInf = "/upper_" + *It;
+        std::string infSubfolder = root + inf + subInf;
+        // Structure which would store the metadata
+        struct stat sb;
+
+        // Calls the function with path as argument
+        // If the file/directory exists at the path returns 0
+        // If block executes if path exists
+        if (stat(infSubfolder.c_str(), &sb) == 0)
+        {
+            infMap[*It] = inf;
+
+        }
+      }
+    }
+}
+
+int get_iface_numa_node(
+  const std::string& iface,
+  int *node,
+  CephContext *cct)
+{
+  int r = get_iface_numa_node_legacy(iface,node);
+  if( r >= 0) 
+    return r;
+  //could not find try a different way
+  r = -10; 
+  std::vector<std::string > interfaces;
+
+  if (getInterfaceList(interfaces) ) {
+        std::map<std::string,std::string> subInterfaceMap;
+        for (const auto& iface : interfaces) {
+            CheckSubLayerInterfaceMap(iface,interfaces,subInterfaceMap);
+        }
+	r = -11;
+        if(subInterfaceMap.size() > 0 )
+        {
+	  r = -12;	
+	  if(subInterfaceMap.find(iface) != subInterfaceMap.end())
+	  {
+	    r = -13;	  
+	    string low_iface = subInterfaceMap[iface];
+	    if(cct)
+	    {
+               lderr(cct) << "ifa " << low_iface.c_str() << dendl;
+	    }
+	    r = get_iface_numa_node_legacy(low_iface,node);
+	  }
+	}
+ 
+  } 
+
+  return r; 
+}

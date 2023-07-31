@@ -2464,7 +2464,10 @@ int OSD::set_numa_affinity()
   string back_iface = pick_iface(
     cct,
     cluster_messenger->get_myaddrs().front().get_sockaddr_storage());
-  int r = get_iface_numa_node(front_iface, &front_node);
+  int r = get_iface_numa_node(front_iface, &front_node,cct);
+  dout(1) << __func__ << " get_iface_numa_node res : " << r << " iface : " << front_iface.c_str()
+	  << dendl;
+
   if (r >= 0 && front_node >= 0) {
     dout(1) << __func__ << " public network " << front_iface << " numa node "
             << front_node << dendl;

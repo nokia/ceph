@@ -93,6 +93,10 @@ const struct sockaddr *find_ip_in_subnet_list(
 
 int get_iface_numa_node(
   const std::string& iface,
-  int *node);
+  int *node,
+  CephContext *cct = nullptr
+  );
+
+
 
 #endif
